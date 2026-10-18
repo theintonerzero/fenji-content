@@ -69,6 +69,9 @@ trap 'rm -rf -- "$stage"' EXIT
 } > "$stage/manifest.json"
 
 pack="$out/fenji-content-$version.tar.gz"
+# A -C with no file after it is an error to GNU tar, so the repository's files only when it has some.
+members=(-C "$stage" manifest.json)
+if [ "${#files[@]}" -gt 0 ]; then members+=(-C "$root" "${files[@]}"); fi
 tar --format=gnu --no-recursion --owner=0 --group=0 --numeric-owner --mtime=@0 --mode=0644 \
-  -cf - -C "$stage" manifest.json -C "$root" "${files[@]}" | gzip -n -9 > "$pack"
+  -cf - "${members[@]}" | gzip -n -9 > "$pack"
 echo "$pack: $lines lines in ${#texts[@]} text files"
