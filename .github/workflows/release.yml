@@ -1,0 +1,110 @@
+# A v* tag builds the content pack, signs it with the content key behind the maintainer's approval,
+# and publishes it with its signature. Fenji's launcher checks the signature against the key it
+# carries before it uses a pack.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions: {}
+
+jobs:
+  pack:
+    name: Build the pack
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      sha256: ${{ steps.pack.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: pack
+        name: Build it with scripts/pack.sh
+        run: |
+          scripts/pack.sh "$GITHUB_REF_NAME" dist
+          echo "sha256=$(sha256sum "dist/fenji-content-$GITHUB_REF_NAME.tar.gz" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pack
+          path: dist/fenji-content-${{ github.ref_name }}.tar.gz
+          if-no-files-found: error
+
+  sign:
+    # Behind the maintainer's approval of the release environment, in a job that builds nothing: it
+    # takes the pack only if it's the one the pack job reported, signs it, and checks the signature
+    # against content.pub. Only the signing step holds the key.
+    name: Sign the pack
+    needs: pack
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pack
+          path: dist
+      - name: Take only the pack its job reported
+        env:
+          WANT: ${{ needs.pack.outputs.sha256 }}
+        run: |
+          got=$(sha256sum "dist/fenji-content-$GITHUB_REF_NAME.tar.gz" | cut -d' ' -f1)
+          if [ "$got" != "$WANT" ]; then
+            echo "::error::The pack isn't the one its job reported."
+            exit 1
+          fi
+      - name: Install minisign, from Ubuntu's archive
+        run: sudo apt-get install -y --no-install-recommends minisign
+      - name: Sign it, and check the signature against content.pub
+        env:
+          CONTENT_SIGNING_KEY: ${{ secrets.CONTENT_SIGNING_KEY }}
+          CONTENT_SIGNING_PASSWORD: ${{ secrets.CONTENT_SIGNING_PASSWORD }}
+        run: |
+          if [ -z "$CONTENT_SIGNING_KEY" ]; then
+            echo "::error::The release environment has no CONTENT_SIGNING_KEY, so the pack can't be signed."
+            exit 1
+          fi
+          if [ ! -f content.pub ]; then
+            echo "::error::content.pub, the content key's public half, isn't in the repository."
+            exit 1
+          fi
+          key="$RUNNER_TEMP/content.key"
+          (umask 077 && printf '%s\n' "$CONTENT_SIGNING_KEY" > "$key")
+          pack="dist/fenji-content-$GITHUB_REF_NAME.tar.gz"
+          printf '%s\n' "$CONTENT_SIGNING_PASSWORD" | minisign -S -s "$key" -m "$pack" -t "fenji-content $GITHUB_REF_NAME"
+          rm -f "$key"
+          minisign -V -p content.pub -m "$pack"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: signed
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish the release
+    needs: sign
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: signed
+          path: dist
+      - name: Release the pack and its signature
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "fenji-content $GITHUB_REF_NAME" \
+            --notes "The content pack, signed with Fenji's content key. Fenji's launcher fetches and checks it."

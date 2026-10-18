@@ -1,0 +1,21 @@
+# Every change must still build a pack: scripts/pack.sh refuses what Fenji's launcher would.
+name: check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  pack:
+    name: The files build a pack
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: scripts/pack.sh v0.0.0 "$RUNNER_TEMP/dist"
